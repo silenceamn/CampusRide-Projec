@@ -1,0 +1,236 @@
+import React, { useState, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { base44 } from '@/api/base44Client';
+import { createPageUrl } from '@/utils';
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Car, List, MapPin } from "lucide-react";
+import RideCard from '@/components/rides/RideCard';
+import RideFilters from '@/components/rides/RideFilters';
+import BookRideModal from '@/components/rides/BookRideModal';
+import EmptyState from '@/components/shared/EmptyState';
+import LoadingSpinner from '@/components/shared/LoadingSpinner';
+import { isSameDay } from 'date-fns';
+
+export default function FindRide() {
+const [user, setUser] = useState(null);
+const [filters, setFilters] = useState({
+search: '',
+date: null,
+origin: '',
+destination: '',
+minSeats: '',
+maxPrice: '',
+genderPreference: 'any'
+});
+const [viewMode, setViewMode] = useState('grid');
+const [selectedRide, setSelectedRide] = useState(null);
+const [bookingModalOpen, setBookingModalOpen] = useState(false);
+const [isBooking, setIsBooking] = useState(false);
+
+useEffect(() => {
+const urlParams = new URLSearchParams(window.location.search);
+const origin = urlParams.get('origin');
+const destination = urlParams.get('destination');
+if (origin || destination) {
+setFilters(prev => ({
+...prev,
+origin: origin || '',
+destination: destination || ''
+}));
+}
+
+const loadUser = async () => {
+try {
+const userData = await base44.auth.me();
+setUser(userData);
+} catch (e) {}
+};
+loadUser();
+}, []);
+
+const { data: rides = [], isLoading } = useQuery({
+queryKey: ['rides'],
+queryFn: () => base44.entities.Ride.filter({ status: 'active' }, '-departure_time')
+});
+
+const { data: userProfile } = useQuery({
+queryKey: ['userProfile', user?.email],
+queryFn: () => base44.entities.UserProfile.filter({ user_email: user?.email }),
+enabled: !!user?.email
+});
+
+const filteredRides = rides.filter(ride => {
+// Text search
+if (filters.search) {
+const searchLower = filters.search.toLowerCase();
+const matchesSearch =
+ride.origin?.toLowerCase().includes(searchLower) ||
+ride.destination?.toLowerCase().includes(searchLower) ||
+ride.driver_name?.toLowerCase().includes(searchLower);
+if (!matchesSearch) return false;
+}
+
+// Origin filter
+if (filters.origin) {
+if (!ride.origin?.toLowerCase().includes(filters.origin.toLowerCase())) return false;
+}
+
+// Destination filter
+if (filters.destination) {
+if (!ride.destination?.toLowerCase().includes(filters.destination.toLowerCase())) return false;
+}
+
+// Date filter
+if (filters.date) {
+const rideDate = new Date(ride.departure_time);
+if (!isSameDay(rideDate, filters.date)) return false;
+}
+
+// Min seats filter
+if (filters.minSeats) {
+if (ride.available_seats < parseInt(filters.minSeats)) return false;
+}
+
+// Max price filter
+if (filters.maxPrice) {
+if ((ride.price_per_seat || 0) > parseFloat(filters.maxPrice)) return false;
+}
+
+// Gender preference filter
+if (filters.genderPreference !== 'any') {
+if (ride.preferences?.gender_preference !== 'any' &&
+ride.preferences?.gender_preference !== filters.genderPreference) {
+return false;
+}
+}
+
+return true;
+});
+
+const handleBookRide = async (bookingData) => {
+if (!user) {
+base44.auth.redirectToLogin();
+return;
+}
+
+setIsBooking(true);
+try {
+const profile = userProfile?.[0];
+await base44.entities.Booking.create({
+...bookingData,
+passenger_email: user.email,
+passenger_name: profile?.display_name || user.full_name,
+status: 'pending',
+payment_status: 'pending'
+});
+
+const updatedSeats = selectedRide.available_seats - bookingData.seats_booked;
+await base44.entities.Ride.update(selectedRide.id, {
+available_seats: updatedSeats,
+status: updatedSeats === 0 ? 'full' : 'active'
+});
+
+setBookingModalOpen(false);
+window.location.href = createPageUrl('MyRides');
+} catch (error) {
+console.error('Booking failed:', error);
+}
+setIsBooking(false);
+};
+
+return (
+<div className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
+{/* Header */}
+<div className="bg-white border-b sticky top-0 z-10">
+<div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+<div>
+<h1 className="text-2xl font-bold text-slate-800">Find a Ride</h1>
+<p className="text-slate-500 text-sm mt-1">
+{filteredRides.length} ride{filteredRides.length !== 1 ? 's' : ''} available
+</p>
+</div>
+
+<div className="flex items-center gap-3">
+<Tabs value={viewMode} onValueChange={setViewMode}>
+<TabsList className="bg-slate-100">
+<TabsTrigger value="grid" className="px-3">
+<div className="grid grid-cols-2 gap-0.5 h-4 w-4">
+<div className="bg-current rounded-sm" />
+<div className="bg-current rounded-sm" />
+<div className="bg-current rounded-sm" />
+<div className="bg-current rounded-sm" />
+</div>
+</TabsTrigger>
+<TabsTrigger value="list" className="px-3">
+<List className="h-4 w-4" />
+</TabsTrigger>
+</TabsList>
+</Tabs>
+</div>
+</div>
+
+<div className="mt-4">
+<RideFilters filters={filters} onFilterChange={setFilters} />
+</div>
+</div>
+</div>
+
+{/* Content */}
+<div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+{isLoading ? (
+<LoadingSpinner text="Finding rides..." />
+) : filteredRides.length === 0 ? (
+<EmptyState
+icon={Car}
+title="No rides found"
+description="Try adjusting your filters or check back later for new rides"
+actionLabel="Clear Filters"
+onAction={() => setFilters({
+search: '',
+date: null,
+origin: '',
+destination: '',
+minSeats: '',
+maxPrice: '',
+genderPreference: 'any'
+})}
+/>
+) : (
+<div className={viewMode === 'grid'
+? "grid sm:grid-cols-2 lg:grid-cols-3 gap-6"
+: "space-y-4"
+}>
+{filteredRides.map((ride) => (
+<RideCard
+key={ride.id}
+ride={ride}
+compact={viewMode === 'list'}
+onBook={(r) => {
+setSelectedRide(r);
+setBookingModalOpen(true);
+}}
+onView={(r) => {
+window.location.href = createPageUrl('RideDetails') + '?id=' + r.id;
+}}
+/>
+))}
+</div>
+)}
+</div>
+
+{/* Booking Modal */}
+<BookRideModal
+ride={selectedRide}
+open={bookingModalOpen}
+onClose={() => {
+setBookingModalOpen(false);
+setSelectedRide(null);
+}}
+onConfirm={handleBookRide}
+isLoading={isBooking}
+/>
+</div>
+);
+}
